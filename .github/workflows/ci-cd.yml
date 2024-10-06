@@ -1,0 +1,101 @@
+name: CI/CD Pipeline with Docker
+
+on:
+  push:
+    branches:
+      - main  # Trigger pipeline on push to the main branch
+    tags:
+      - 'v*'  # Trigger pipeline on version tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # Use Ubuntu runner, Docker is pre-installed
+
+    steps:
+      # Checkout the code from the repository
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      # Log in to Docker Hub
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      # Define image tag using Git SHA or tag
+      - name: Set up image tag
+        id: image_tag
+        run: echo "IMAGE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      # Build the Docker image with versioning
+      - name: Build Docker image
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }} .
+
+      # Optionally remove old Docker images before pushing (uncomment if needed)
+      # - name: Remove old Docker images before push
+      #   run: docker rmi -f ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }} || true
+
+      # Push the Docker image to Docker Hub
+      - name: Push Docker image
+        run: docker push ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }}
+
+  deploy:
+    needs: build  # Deployment job depends on build job
+    runs-on: ubuntu-latest
+
+    steps:
+      # Install sshpass (if needed for password-based SSH authentication)
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      # Copy SSH key and set permissions (for key-based authentication)
+      - name: Copy SSH key and set permissions
+        run: |
+          echo "${{ secrets.SERVER_SSH_KEY }}" > private_key
+          chmod 600 private_key
+
+      # Deploy to server
+      - name: Deploy to server
+        run: |
+          # Choose between key-based or password-based authentication:
+          # Uncomment the following line for password-based SSH login and comment the key-based login
+          # sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
+
+          # Use this line for SSH key-based login (default)
+          ssh -o StrictHostKeyChecking=no -i private_key ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << EOF
+
+          # Check if Docker is installed
+          if ! [ -x "$(command -v docker)" ]; then
+            echo "Docker not found. Installing Docker..."
+            sudo apt-get update
+            sudo apt-get install -y \
+              ca-certificates \
+              curl \
+              gnupg \
+              lsb-release
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            echo "deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+            sudo usermod -aG docker \$USER
+            echo "Docker installed successfully."
+          else
+            echo "Docker is already installed."
+          fi
+
+          # Optionally remove old Docker images before pulling (uncomment if needed)
+          # docker rmi -f ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }} || true
+
+          # Optionally remove old Docker images with the same name before pulling
+          # This removes all versions of the image with the same name
+          # docker rmi -f ${{ secrets.DOCKER_USERNAME }}/myapp:* || true
+
+
+          # Pull the latest Docker image from Docker Hub
+          docker pull ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }}
+
+          # Stop and remove the existing container if it's running
+          docker stop myapp_con || true
+          docker rm myapp_con || true
+
+          # Run the new container with the 'unless-stopped' restart policy
+          docker run -d -p 11111:80 --name myapp_con --restart unless-stopped ${{ secrets.DOCKER_USERNAME }}/myapp:${{ env.IMAGE_TAG }}
+          EOF
